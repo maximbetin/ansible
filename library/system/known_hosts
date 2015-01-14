@@ -30,7 +30,7 @@ version_added: "1.6"
 options:
   host:
     description:
-      - The host to add or remove (must match host specified in key)
+      - The host to add or remove (must match a host specified in key)
     required: true
     default: null
   key:
@@ -143,33 +143,25 @@ def sanity_check(module,host,key):
     provided is inconsistent with the key supplied, then this function
     quits, providing an error to the user.
     '''
-    #First, see if the hostname is hashed; if not, we have an easier job
-    k=key.split() #split into fields
-    #| as first character of hostname => hashed hostname
-    if k[0][0] != '|':
-        #The optional "marker" field, used for @cert-authority or @revoked
-        if k[0][0] == '@':
-            keyhost=k[1]
-        else:
-            keyhost=k[0]
-        if host != keyhost:
-            module.fail_json(msg="Host parameter (%s) does not match host field in supplied key(%s)" % (host,keyhost))
-    else:
-        #Hostname hashed; so we have to write it to a temporary file,
-        #and then attempt to look up the specified host in that file.
-        try:
-            outf=tempfile.NamedTemporaryFile(delete=False)
-            outf.write(key)
-            outf.close()
-        except IOError,e:
-            module.fail_json(msg="Failed to write to temporary file %s: %s" % \
-                                 (outf.name,str(e)))
-        rc,stdout,stderr=module.run_command(['ssh-keygen','-F',host,
-                                             '-f',outf.name],
-                                            check_rc=True)
-        os.remove(outf.name)
-        if stdout=='': #host not found
-            module.fail_json(msg="Host parameter does not match hashed host field in supplied key")
+    #Rather than parsing the key ourselves, get ssh-keygen to do it
+    #(this is essential for hashed keys, but otherwise useful, as the
+    #key question is whether ssh-keygen thinks the key matches the host).
+
+    #The approach is to write the key to a temporary file,
+    #and then attempt to look up the specified host in that file.
+    try:
+        outf=tempfile.NamedTemporaryFile(delete=False)
+        outf.write(key)
+        outf.close()
+    except IOError,e:
+        module.fail_json(msg="Failed to write to temporary file %s: %s" % \
+                             (outf.name,str(e)))
+    rc,stdout,stderr=module.run_command(['ssh-keygen','-F',host,
+                                         '-f',outf.name],
+                                        check_rc=True)
+    os.remove(outf.name)
+    if stdout=='': #host not found
+        module.fail_json(msg="Host parameter does not match hashed host field in supplied key")
 
 def search_for_host_key(module,host,key,path):
     '''search_for_host_key(module,host,key,path) -> (current,replace)
@@ -190,7 +182,21 @@ def search_for_host_key(module,host,key,path):
 
     lines=stdout.split('\n')
     k=key.strip() #trim trailing newline
+    #ssh-keygen returns only the host we ask about in the host field,
+    #even if the key entry has multiple hosts. Emulate this behaviour here,
+    #otherwise we get false negatives.
+    #Only necessary for unhashed entries.
+    if k[0] !='|':
+        k=k.split()
+        #The optional "marker" field, used for @cert-authority or @revoked
+        if k[0][0] == '@':
+            k[1]=host
+        else:
+            k[0]=host
+        k=' '.join(k)
     for l in lines:
+        if l=='': 
+            continue
         if l[0]=='#': #comment
             continue
         if k==l: #found a match
